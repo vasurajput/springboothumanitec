@@ -1,0 +1,15 @@
+name: javadream-app
+
+containers:
+  - name: app
+    image: 025861172968.dkr.ecr.us-east-1.amazonaws.com/javadream-ecr-registry:latest
+    variables:
+      env:
+        SPRING_PROFILES_ACTIVE: prod
+        JAVA_OPTS: "-Xms256m -Xmx512m"
+    port: 8080
+
+service:
+  ports:
+    - port: 80
+      target_port: 8080
