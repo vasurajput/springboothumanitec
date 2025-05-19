@@ -1,0 +1,83 @@
+#Set custom path for current session in intellij
+ $env:JAVA_HOME = "C:\VasuDev\Softwares\openlogic-openjdk-21.0.3+9-windows-x64\openlogic-openjdk-21.0.3+9-windows-x64"
+ $env:PATH = "$env:JAVA_HOME\bin;" + $env:PATH
+
+AmazonEC2ContainerRegistryFullAccess this permission needs to add for creating ECR from aws cli
+aws ecr create-repository --repository-name javadream-ecr-registry  --region ap-south-1            // command to create repository
+aws ecr delete-repository --repository-name vasu-ecr-registry --region us-east-1               // command to delete repository
+
+
+aws sts get-caller-identity   // Command to get identity details
+
+aws ecr describe-repositories --region us-east-1   // command to display ecr list region wise
+
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 025861172968.dkr.ecr.us-east-1.amazonaws.com  // Command to login to ecr
+docker logout 025861172968.dkr.ecr.us-east-1.amazonaws.com  // command to logout from ecr
+
+#Tag and push image to ECR
+docker tag my-webflux-app:latest <your-aws-account-id>.dkr.ecr.us-east-1.amazonaws.com/webflux-app:1.0.0
+
+docker push <your-aws-account-id>.dkr.ecr.us-east-1.amazonaws.com/webflux-app:1.0.0
+
+
+#INstall Kubectl cli on local
+
+curl -LO https://dl.k8s.io/release/v1.33.1/bin/windows/amd64/kubectl.exe     // Use this command in commandprompt to install kubectl exe
+https://cdn.dl.k8s.io/release/stable.txt                                     // This website tell stable version of kubectl just change it on your cmd above
+sysdm.cpl                                                                    // win+R then type this it 'll open system property tab instead of going manually
+
+
+# Below command is use to connect to the EKS cluster
+aws eks --region us-east-1 update-kubeconfig --name your-cluster-name
+kubectl get nodes                                                          // Command to verify after connecting to cluster
+
+# Get the Kubeconfig of Your EKS Cluster  [ This 'll create a file at C:\Users\vasu\.kube with cluster details. You can use this detail to connect with humanitec]
+aws eks update-kubeconfig --region us-east-1 --name [Your-cluster-name]
+aws eks get-token --cluster-name demo-cluster                                 // This command is use to generate Token
+aws eks describe-cluster --name demo-cluster --region us-east-1 --query "cluster.endpoint" --output text    // THis command use to get cluster url
+
+
+# Below command for humanitec install page
+https://developer.humanitec.com/platform-orchestrator/cli/
+
+humctl score validate score.yaml                                              // Command to validate score file. You must inside the directory where score.yaml present
+humctl score deploy --file score.yaml --app demo --env development            // Command to deploy
+kubectl get pods -n humanitec-system                                          // Command to check if humanitec operator install on EKS cluster or not. It should be install
+																				 else you get error
+		Note: if getting not found by using above command means we have to install on EKS custer
+for this first we have to install helm. As helm is required to install that. Download from this link https://github.com/helm/helm/releases
+
+helm install humanitec-operator oci://ghcr.io/humanitec/charts/humanitec-operator --namespace humanitec-system --create-namespace    // Command to install humanitec operator
+humctl get deployments --app demo --env development                            // Command to list all deployment of humanitec
+
+
+
+
+# WE need to create secret store also for kubernetes use below commands
+echo apiVersion: humanitec.io/v1alpha1 > secretstore.yaml
+echo kind: SecretStore >> secretstore.yaml
+echo metadata: >> secretstore.yaml
+echo   name: default-k8s-secret-store >> secretstore.yaml
+echo   namespace: humanitec-system >> secretstore.yaml
+echo   labels: >> secretstore.yaml
+echo     app.humanitec.io/default-store: "true" >> secretstore.yaml
+echo spec: >> secretstore.yaml
+echo   kubernetes: >> secretstore.yaml
+echo     namespace: humanitec-system >> secretstore.yaml
+
+
+Apply the Updated Secret Store
+Apply the updated secretstore.yaml file to your cluster:
+kubectl apply -f secretstore.yaml
+
+Verify the Secret Store Creation
+Confirm the secret store was created successfully:
+kubectl get secretstores.humanitec.io -n humanitec-system
+
+Verify the label:
+kubectl get secretstores.humanitec.io default-k8s-secret-store -n humanitec-system -o yaml | findstr app.humanitec.io/default-store
+
+Retry the Deployment
+With the default secret store now correctly configured, redeploy your application:
+humctl score deploy --file score.yaml --app demo --env development
+

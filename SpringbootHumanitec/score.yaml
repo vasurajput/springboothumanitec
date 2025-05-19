@@ -1,15 +1,17 @@
-name: javadream-app
-
+apiVersion: score.dev/v1b1
+metadata:
+  name: my-webflux-app
 containers:
-  - name: app
-    image: 025861172968.dkr.ecr.us-east-1.amazonaws.com/javadream-ecr-registry:latest
+  app:
+    image: 025861172968.dkr.ecr.us-east-1.amazonaws.com/javadream-ecr-registry
+    command: ["java", "-jar", "/app/app.jar"]
+    resources:
+      limits: { cpu: "500m", memory: "512Mi" }
+      requests: { cpu: "250m", memory: "256Mi" }
     variables:
-      env:
-        SPRING_PROFILES_ACTIVE: prod
-        JAVA_OPTS: "-Xms256m -Xmx512m"
-    port: 8080
-
+      #      SPRING_PROFILES_ACTIVE: "prod"
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+#      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: "health,info"
 service:
   ports:
-    - port: 80
-      target_port: 8080
+    http: { port: 8080, targetPort: 8080 }
