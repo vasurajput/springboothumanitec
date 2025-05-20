@@ -12,8 +12,8 @@ public class DemoController {
     private ApiService service;
 
     @GetMapping("/test")
-    public Mono<String> test() {
-        Mono<String> stringMono = service.makeGenericGetCall();
+    public Mono<Object> test() {
+        Mono<Object> stringMono = service.makeGenericGetCall();
         return stringMono;
     }
 

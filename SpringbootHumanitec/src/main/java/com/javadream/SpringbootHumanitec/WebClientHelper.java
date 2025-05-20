@@ -1,8 +1,8 @@
 package com.javadream.SpringbootHumanitec;
 
+import com.javadream.SpringbootHumanitec.exception.CustomApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -16,15 +16,14 @@ import java.util.Map;
 public class WebClientHelper {
 
     private static final Logger log = LoggerFactory.getLogger(WebClientHelper.class);
-
     private final WebClient webClient;
 
     public WebClientHelper() {
-        this.webClient = WebClient.builder()
-                .build();
+        this.webClient = WebClient.builder().build();
     }
 
     public <T> Mono<T> get(String url, Map<String, String> headers, Class<T> responseType) {
+        String location = "WebClientHelper::GET " + url;
         return webClient.get()
                 .uri(url)
                 .headers(httpHeaders -> {
@@ -33,19 +32,31 @@ public class WebClientHelper {
                 .accept(MediaType.APPLICATION_JSON)
                 .retrieve()
                 .onStatus(
-                        status -> status.is4xxClientError() || status.is5xxServerError(),
-                        clientResponse -> clientResponse
-                                .bodyToMono(String.class)
+                        status -> status.isError(),
+                        response -> response.bodyToMono(String.class)
                                 .defaultIfEmpty("Unknown error")
-                                .map(error -> new RuntimeException("Request failed: " + error))
+                                .flatMap(errorBody ->
+                                        Mono.error(new CustomApiException(response.statusCode().value(), errorBody, location))
+                                )
                 )
                 .bodyToMono(responseType)
-                .doOnError(WebClientResponseException.class, ex ->
-                        log.error("WebClient GET error {}: {}", ex.getStatusCode(), ex.getResponseBodyAsString()))
-                .timeout(Duration.ofSeconds(10));
+                .timeout(Duration.ofSeconds(10))
+                .onErrorResume(WebClientResponseException.class, ex -> {
+                    log.error("WebClient GET error at {}: {} - StackTrace:", location, ex.getMessage(), ex);
+                    return Mono.error(new CustomApiException(
+                            ex.getStatusCode().value(),
+                            ex.getResponseBodyAsString(),
+                            location
+                    ));
+                })
+                .onErrorResume(ex -> {
+                    log.error("Unknown WebClient GET error at {}: {}", location, ex.getMessage(), ex);
+                    return Mono.error(new CustomApiException(500, "Unexpected error occurred while calling API", location));
+                });
     }
 
     public <T> Mono<T> post(String url, Object payload, Map<String, String> headers, Class<T> responseType) {
+        String location = "WebClientHelper::POST " + url;
         return webClient.post()
                 .uri(url)
                 .headers(httpHeaders -> {
@@ -56,15 +67,26 @@ public class WebClientHelper {
                 .bodyValue(payload)
                 .retrieve()
                 .onStatus(
-                        status -> status.is4xxClientError() || status.is5xxServerError(),
-                        clientResponse -> clientResponse
-                                .bodyToMono(String.class)
+                        status -> status.isError(),
+                        response -> response.bodyToMono(String.class)
                                 .defaultIfEmpty("Unknown error")
-                                .map(error -> new RuntimeException("Request failed: " + error))
+                                .flatMap(errorBody ->
+                                        Mono.error(new CustomApiException(response.statusCode().value(), errorBody, location))
+                                )
                 )
                 .bodyToMono(responseType)
-                .doOnError(WebClientResponseException.class, ex ->
-                        log.error("WebClient POST error {}: {}", ex.getStatusCode(), ex.getResponseBodyAsString()))
-                .timeout(Duration.ofSeconds(10));
+                .timeout(Duration.ofSeconds(10))
+                .onErrorResume(WebClientResponseException.class, ex -> {
+                    log.error("WebClient POST error at {}: {} - StackTrace:", location, ex.getMessage(), ex);
+                    return Mono.error(new CustomApiException(
+                            ex.getStatusCode().value(), // <-- use this instead of getRawStatusCode()
+                            ex.getResponseBodyAsString(),
+                            location
+                    ));
+                })
+                .onErrorResume(ex -> {
+                    log.error("Unknown WebClient POST error at {}: {}", location, ex.getMessage(), ex);
+                    return Mono.error(new CustomApiException(500, "Unexpected error occurred while calling API", location));
+                });
     }
 }
