@@ -1,0 +1,12 @@
+spring:
+  application:
+    name:
+
+#Mappings configuration
+api:
+  mappings:
+    bene:
+      endpoints:
+        getUserById: http://localhost:8082/users/{id}
+        getAllUser: http://localhost:8082/users/search
+
