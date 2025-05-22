@@ -1,5 +1,3 @@
-package com.javadream.common.config;
-
 import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.handler.timeout.WriteTimeoutHandler;
@@ -18,7 +16,7 @@ public class WebClientFactory {
 
     @Bean
     public WebClient webClient() {
-        ConnectionProvider provider = ConnectionProvider.builder("custom-connection-pool")
+        ConnectionProvider provider = ConnectionProvider.builder("custom-pool")
                 .maxConnections(100)
                 .pendingAcquireTimeout(Duration.ofSeconds(30))
                 .maxIdleTime(Duration.ofSeconds(20))
@@ -27,9 +25,8 @@ public class WebClientFactory {
         HttpClient httpClient = HttpClient.create(provider)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
                 .doOnConnected(conn -> conn
-                        .addHandlerLast(new ReadTimeoutHandler(10, TimeUnit.SECONDS))
-                        .addHandlerLast(new WriteTimeoutHandler(10, TimeUnit.SECONDS))
-                );
+                        .addHandlerLast(new ReadTimeoutHandler(30, TimeUnit.SECONDS))  // 🔥 INCREASED
+                        .addHandlerLast(new WriteTimeoutHandler(30, TimeUnit.SECONDS)));
 
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
@@ -38,7 +35,8 @@ public class WebClientFactory {
 }
 
 
-=======================
+=================
+
 
 package com.javadream.common.webclient;
 
@@ -47,24 +45,21 @@ import com.javadream.common.mapping.ApiMappingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.util.UriComponentsBuilder;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.lang.reflect.Field;
 import java.net.URI;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.HashMap;
+import java.util.Map;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class WebClientClient {
 
-    private final WebClient webClient; // ✅ singleton
+    private final WebClient webClient; // ✅ Injected from factory
     private final ApiMappingService apiMappingService;
 
     public <T> Mono<T> callMono(String apiKey,
@@ -73,105 +68,52 @@ public class WebClientClient {
                                 Map<String, String> headers,
                                 Class<T> responseType) {
 
-        URI uri = buildFinalUri(resolveUrl(apiKey, pathParams), toQueryMap(queryParams));
-        log.info("Final URI: {}", uri);
+        URI uri = buildUri(resolveUrl(apiKey, pathParams), toMap(queryParams));
+        log.info("Calling third-party API [{}] -> {}", apiKey, uri);
 
         return webClient.get()
                 .uri(uri)
-                .headers(httpHeaders -> {
-                    if (headers != null) headers.forEach(httpHeaders::add);
+                .headers(h -> {
+                    if (headers != null) headers.forEach(h::add);
                 })
                 .retrieve()
-                .onStatus(
-                        status -> status.is4xxClientError(),
-                        response -> response.bodyToMono(String.class)
-                                .flatMap(body -> Mono.error(new ExternalApiException("Client Error: " + body)))
-                )
-                .onStatus(
-                        status -> status.is5xxServerError(),
-                        response -> response.bodyToMono(String.class)
-                                .flatMap(body -> Mono.error(new ExternalApiException("Server Error: " + body)))
-                )
                 .bodyToMono(responseType);
     }
 
-    public <T> Flux<T> callFlux(String apiKey,
-                                Object queryParams,
-                                Map<String, String> pathParams,
-                                Map<String, String> headers,
-                                Class<T> responseType) {
-
-        URI uri = buildFinalUri(resolveUrl(apiKey, pathParams), toQueryMap(queryParams));
-        log.info("Final URI: {}", uri);
-
-        return webClient.get()
-                .uri(uri)
-                .headers(httpHeaders -> {
-                    if (headers != null) headers.forEach(httpHeaders::add);
-                })
-                .retrieve()
-                .onStatus(
-                        status -> status.is4xxClientError(),
-                        response -> response.bodyToMono(String.class)
-                                .flatMap(body -> Mono.error(new ExternalApiException("Client Error: " + body)))
-                )
-                .onStatus(
-                        status -> status.is5xxServerError(),
-                        response -> response.bodyToMono(String.class)
-                                .flatMap(body -> Mono.error(new ExternalApiException("Server Error: " + body)))
-                )
-                .bodyToFlux(responseType);
-    }
-
-    private String resolveUrl(String apiKey, Map<String, String> pathParams) {
-        String urlTemplate = apiMappingService.resolve(apiKey);
-        if (urlTemplate == null) {
-            throw new ExternalApiException("No API mapping found for key: " + apiKey);
-        }
+    private String resolveUrl(String key, Map<String, String> pathParams) {
+        String url = apiMappingService.resolve(key);
         if (pathParams != null) {
-            for (Map.Entry<String, String> entry : pathParams.entrySet()) {
-                urlTemplate = urlTemplate.replace("{" + entry.getKey() + "}", entry.getValue());
+            for (var entry : pathParams.entrySet()) {
+                url = url.replace("{" + entry.getKey() + "}", entry.getValue());
             }
         }
-        return urlTemplate;
+        return url;
     }
 
-    private static URI buildFinalUri(String baseUrl, Map<String, String> queryParams) {
-        MultiValueMap<String, String> multiQueryParams = queryParams.entrySet().stream()
-                .collect(Collectors.toMap(
-                        Map.Entry::getKey,
-                        e -> List.of(e.getValue() == null ? "" : e.getValue()),
-                        (a, b) -> b,
-                        LinkedMultiValueMap::new
-                ));
-
-        return UriComponentsBuilder
-                .fromHttpUrl(baseUrl)
-                .queryParams(multiQueryParams)
-                .build(true)
-                .toUri();
+    private static URI buildUri(String baseUrl, Map<String, String> queryParams) {
+        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(baseUrl);
+        queryParams.forEach((k, v) -> builder.queryParam(k, v == null ? "" : v));
+        return builder.build(true).toUri();
     }
 
-    public static Map<String, String> toQueryMap(Object input) {
-        if (input == null) return Map.of();
-
-        if (input instanceof Map<?, ?> map) {
-            return map.entrySet().stream()
-                    .collect(Collectors.toMap(
-                            e -> String.valueOf(e.getKey()),
-                            e -> String.valueOf(e.getValue())
-                    ));
+    private static Map<String, String> toMap(Object obj) {
+        if (obj instanceof Map<?, ?> map) {
+            Map<String, String> stringMap = new HashMap<>();
+            map.forEach((k, v) -> stringMap.put(String.valueOf(k), String.valueOf(v)));
+            return stringMap;
         }
-
         Map<String, String> result = new HashMap<>();
-        for (Field field : input.getClass().getDeclaredFields()) {
+        for (Field field : obj.getClass().getDeclaredFields()) {
             field.setAccessible(true);
             try {
-                Object value = field.get(input);
-                result.put(field.getName(), value == null ? "" : String.valueOf(value));
-            } catch (IllegalAccessException ignored) {
-            }
+                Object val = field.get(obj);
+                result.put(field.getName(), val == null ? "" : val.toString());
+            } catch (Exception ignored) {}
         }
         return result;
     }
 }
+
+
+
+ private final WebClientClient webClientClient;
