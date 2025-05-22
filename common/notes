@@ -1,88 +1,194 @@
-package com.javadream.common.config;
+package com.javadream.common.webclient;
 
+import com.javadream.common.exception.ExternalApiException;
+import com.javadream.common.mapping.ApiMappingService;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
-import io.netty.handler.timeout.WriteTimeoutHandler;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.util.UriBuilder;
+import org.springframework.web.util.UriComponentsBuilder;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 
+import java.lang.reflect.Field;
+import java.net.URI;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Configuration
-public class WebClientFactory {
+public class WebClientConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(WebClientConfig.class);
+
+    private final ApiMappingService apiMappingService;
+
+    public WebClientConfig(ApiMappingService apiMappingService) {
+        this.apiMappingService = apiMappingService;
+    }
 
     @Bean
     public WebClient webClient() {
-        ConnectionProvider provider = ConnectionProvider.builder("pooled-client")
-                .maxConnections(200)
-                .pendingAcquireTimeout(Duration.ofSeconds(60))
-                .maxIdleTime(Duration.ofSeconds(60))
+        // Configure connection provider for connection pooling
+        ConnectionProvider connectionProvider = ConnectionProvider.builder("custom")
+                .maxConnections(50) // Adjust based on your needs
+                .maxIdleTime(Duration.ofSeconds(20)) // Keep connections alive for 20 seconds
+                .maxLifeTime(Duration.ofSeconds(60)) // Max lifetime for connections
+                .pendingAcquireTimeout(Duration.ofSeconds(10)) // Timeout for acquiring a connection
+                .evictInBackground(Duration.ofSeconds(30)) // Evict idle connections periodically
                 .build();
 
-        HttpClient httpClient = HttpClient.create(provider)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
-                .doOnConnected(conn -> conn
-                        .addHandlerLast(new ReadTimeoutHandler(60, TimeUnit.SECONDS))
-                        .addHandlerLast(new WriteTimeoutHandler(60, TimeUnit.SECONDS)));
+        // Configure HttpClient with timeouts
+        HttpClient httpClient = HttpClient.create(connectionProvider)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000) // 5s connect timeout
+                .responseTimeout(Duration.ofSeconds(10)) // 10s response timeout
+                .doOnConnected(conn ->
+                        conn.addHandlerLast(new ReadTimeoutHandler(10, TimeUnit.SECONDS))); // 10s read timeout
 
+        // Build WebClient with ReactorClientHttpConnector
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .build();
     }
-}
 
-====================
-
-@RequiredArgsConstructor
-@Component
-@Slf4j
-public class WebClientClient {
-
-    private final WebClient webClient;
-    private final ApiMappingService apiMappingService; // ✅ Injected
-
-    public <T> Mono<T> callMono(String apiKey,
-                                Map<String, String> queryParams,
+    public <T> Mono<T> callMono(WebClient webClient,
+                                String apiKey,
+                                Object queryParams,
                                 Map<String, String> pathParams,
                                 Map<String, String> headers,
                                 Class<T> responseType) {
 
-        String baseUrl = resolveUrl(apiKey, pathParams); // ✅ lookup + replace {id}
-        URI uri = buildUri(baseUrl, queryParams);
+        URI uri = buildFinalUri(resolveUrl(apiKey, pathParams), toQueryMap(queryParams));
+        log.info("Calling third-party API for key: {} : {}", apiKey, uri);
 
-        return webClient.get()
+        return webClient
+                .get()
                 .uri(uri)
-                .headers(h -> {
-                    if (headers != null) headers.forEach(h::add);
+                .headers(httpHeaders -> {
+                    if (headers != null) {
+                        headers.forEach(httpHeaders::add);
+                    }
                 })
                 .retrieve()
+                .onStatus(
+                        status -> status.is4xxClientError(),
+                        response -> response.bodyToMono(String.class)
+                                .flatMap(body -> Mono.error(new ExternalApiException("Client Error: " + body)))
+                )
+                .onStatus(
+                        status -> status.is5xxServerError(),
+                        response -> response.bodyToMono(String.class)
+                                .flatMap(body -> Mono.error(new ExternalApiException("Server Error: " + body)))
+                )
                 .bodyToMono(responseType)
-                .onErrorResume(ex -> {
-                    log.error("❌ API call failed: {}", ex.getMessage());
-                    return Mono.error(new ExternalApiException("Call failed", ex));
-                });
+                .doOnError(throwable -> log.error("Error calling API for key {}: {}", apiKey, throwable.getMessage()));
+    }
+
+    public <T> Flux<T> callFlux(WebClient webClient,
+                                String apiKey,
+                                Object queryParams,
+                                Map<String, String> pathParams,
+                                Map<String, String> headers,
+                                Class<T> responseType) {
+
+        String url = resolveUrl(apiKey, pathParams);
+
+        return webClient
+                .get()
+                .uri(uriBuilder -> {
+                    UriBuilder builder = uriBuilder.path(url);
+                    toQueryMap(queryParams).forEach((key, value) ->
+                            builder.queryParam(key, value == null ? "" : value));
+                    URI finalUri = builder.build();
+                    log.info("Calling third-party API for key: {} : {}", apiKey, finalUri);
+                    return finalUri;
+                })
+                .headers(httpHeaders -> {
+                    if (headers != null) {
+                        headers.forEach(httpHeaders::add);
+                    }
+                })
+                .retrieve()
+                .onStatus(
+                        status -> status.is4xxClientError(),
+                        response -> response.bodyToMono(String.class)
+                                .flatMap(body -> Mono.error(new ExternalApiException("Client Error: " + body)))
+                )
+                .onStatus(
+                        status -> status.is5xxServerError(),
+                        response -> response.bodyToMono(String.class)
+                                .flatMap(body -> Mono.error(new ExternalApiException("Server Error: " + body)))
+                )
+                .bodyToFlux(responseType)
+                .doOnError(throwable -> log.error("Error calling API for key {}: {}", apiKey, throwable.getMessage()));
+    }
+
+    public static URI buildFinalUri(String baseUrl, Map<String, String> queryParams) {
+        MultiValueMap<String, String> multiQueryParams = queryParams.entrySet().stream()
+                .collect(Collectors.toMap(
+                        Map.Entry::getKey,
+                        e -> List.of(e.getValue() == null ? "" : e.getValue()),
+                        (a, b) -> b,
+                        LinkedMultiValueMap::new
+                ));
+
+        return UriComponentsBuilder
+                .fromHttpUrl(baseUrl)
+                .queryParams(multiQueryParams)
+                .build(true)
+                .toUri();
     }
 
     private String resolveUrl(String apiKey, Map<String, String> pathParams) {
-        String template = apiMappingService.resolve(apiKey);
+        String urlTemplate = apiMappingService.resolve(apiKey);
+        if (urlTemplate == null) {
+            throw new ExternalApiException("No API mapping found for key: " + apiKey);
+        }
         if (pathParams != null) {
             for (Map.Entry<String, String> entry : pathParams.entrySet()) {
-                template = template.replace("{" + entry.getKey() + "}", entry.getValue());
+                urlTemplate = urlTemplate.replace("{" + entry.getKey() + "}", entry.getValue());
             }
         }
-        return template;
+        return urlTemplate;
     }
 
-    private URI buildUri(String baseUrl, Map<String, String> queryParams) {
-        UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(baseUrl);
-        if (queryParams != null) {
-            queryParams.forEach((k, v) -> builder.queryParam(k, v));
+    public static Map<String, String> toQueryMap(Object headersSource) {
+        if (headersSource == null) return Map.of();
+
+        if (headersSource instanceof Map<?, ?> map) {
+            return map.entrySet().stream()
+                    .collect(Collectors.toMap(
+                            e -> String.valueOf(e.getKey()),
+                            e -> String.valueOf(e.getValue())
+                    ));
         }
-        return builder.build(true).toUri();
+
+        // Fallback for POJO
+        Map<String, String> result = new HashMap<>();
+        for (Field field : headersSource.getClass().getDeclaredFields()) {
+            field.setAccessible(true);
+            try {
+                Object value = field.get(headersSource);
+                result.put(field.getName(), value == null ? "" : String.valueOf(value));
+            } catch (IllegalAccessException ignored) {
+            }
+        }
+
+        return result;
     }
 }
